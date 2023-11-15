@@ -1,19 +1,18 @@
 import logging
 import os
 import sys
+import time
 
 import requests
-import time
 import telegram
-
 from dotenv import load_dotenv
 
 from exceptions import (
     AuthenticationError,
-    EndpointUnavailableError,
     EndpointError,
-    StatusError,
-    NoNewStatus
+    EndpointUnavailableError,
+    NoNewStatus,
+    StatusError
 )
 
 load_dotenv()
@@ -40,29 +39,17 @@ HOMEWORK_VERDICTS = {
     'rejected': 'Работа проверена: у ревьюера есть замечания.'
 }
 
-STATUS = None
+HW_STATUS = (None, None)
 LAST_MESSAGE = None
 
 
 def check_tokens():
-    """Проверяет доступность переменных окружения"""
-
-    expected_tokens = ['PRACTICUM_TOKEN', 'TELEGRAM_TOKEN', 'TELEGRAM_CHAT_ID']
-    missing_tokens = [
-        token for token in expected_tokens if not os.getenv(token)
-    ]
-
-    if missing_tokens:
-        logger.critical(
-            f'''Отсутствут обязательные переменные окружения: {missing_tokens}.
-Программа принудительно остановлена.'''
-        )
-        sys.exit(0)
+    """Проверяет доступность переменных окружения."""
+    return all([PRACTICUM_TOKEN, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID])
 
 
 def send_message(bot, message):
-    """Отправляет сообщение в Telegram чат"""
-
+    """Отправляет сообщение в Telegram чат."""
     global LAST_MESSAGE
 
     try:
@@ -76,16 +63,15 @@ def send_message(bot, message):
 
 
 def get_api_answer(timestamp):
-    """Делает запрос к единственному эндпоинту API-сервиса"""
-
+    """Делает запрос к единственному эндпоинту API-сервиса."""
     try:
         response = requests.get(
             ENDPOINT, headers=HEADERS, params={'from_date': timestamp}
         )
-        if response.status_code == 404:
+        if response.status_code != 200:
             raise EndpointUnavailableError(
                 f'Сбой в работе программы: Эндпоинт {ENDPOINT} недоступен. '
-                'Код ответа API: 404'
+                f'Код ответа API: {response.status_code}'
             )
         return response.json()
 
@@ -96,9 +82,11 @@ def get_api_answer(timestamp):
 
 
 def check_response(response):
-    """Проверяет ответ API на соответствие документации"""
-
+    """Проверяет ответ API на соответствие документации."""
     expected_keys = {'homeworks', 'current_date'}
+
+    if type(response) is not dict:
+        raise TypeError(f'Ожидался словарь, получен {type(response)}')
 
     if expected_keys != set(response.keys()):
         if response['code'] == 'UnknownError':
@@ -109,36 +97,46 @@ def check_response(response):
             raise KeyError('Отсутствуют ожидаемые ключи в ответе API: '
                            f'{expected_keys - set(response.keys())}')
 
+    if type(response['homeworks']) is not list:
+        raise TypeError(
+            f'Ожидался список, получен: {type(response["homeworks"])}'
+        )
+
     if not response['homeworks']:
         raise NoNewStatus('Нет нового статуса')
 
 
 def parse_status(homework):
-    """Извлекает из информации о конкретной
-        домашней работе статус этой работы"""
-
-    global STATUS
+    """Извлекает из информации о конкретной домашней работе статус."""
+    global HW_STATUS
 
     if 'status' in homework:
-        if homework['status'] != STATUS:
-            if homework['status'] not in HOMEWORK_VERDICTS:
-                raise StatusError(
-                    f'Получен неожиданный статус: {homework["status"]}'
+        if 'homework_name' in homework:
+            if (homework['homework_name'], homework['status']) != HW_STATUS:
+                if homework['status'] not in HOMEWORK_VERDICTS:
+                    raise StatusError(
+                        f'Получен неожиданный статус: {homework["status"]}'
+                    )
+                HW_STATUS = (homework['homework_name'], homework['status'])
+                return (
+                    f'Изменился статус проверки работы '
+                    f'"{homework["homework_name"]}". '
+                    f'{HOMEWORK_VERDICTS.get(homework["status"])}'
                 )
-            STATUS = homework['status']
-            return (
-                f'Изменился статус проверки работы '
-                f'"{homework["lesson_name"]}". {HOMEWORK_VERDICTS[STATUS]}'
-            )
+        raise StatusError('Нет ожидаемого ключа: homework_name')
+    raise StatusError('Нет ожидаемого ключа: status')
 
 
 def main():
     """Основная логика работы бота."""
-
-    check_tokens()
+    if not check_tokens():
+        logger.critical(
+            '''Отсутствуют обязательные переменные окружения.
+Программа принудительно остановлена.'''
+        )
+        sys.exit(0)
     bot = telegram.Bot(token=TELEGRAM_TOKEN)
     timestamp = int(time.time())
-
     while True:
         try:
             response = get_api_answer(timestamp)
@@ -146,24 +144,17 @@ def main():
             timestamp = response['current_date']
             send_message(bot, parse_status(response['homeworks'][0]))
 
-        except EndpointUnavailableError as eue:
-            logger.error(eue)
-            send_message(bot, str(eue))
-        except EndpointError as ee:
-            logger.error(ee)
-            send_message(bot, str(ee))
-        except KeyError as ke:
-            logger.error(ke)
-            send_message(bot, str(ke))
-        except TypeError as te:
-            logger.error(te)
-            send_message(bot, str(te))
-        except AuthenticationError as ae:
-            logger.error(ae)
-            send_message(bot, str(ae))
-        except StatusError as se:
-            logger.error(se)
-            send_message(bot, str(se))
+        except (
+                AuthenticationError,
+                EndpointError,
+                EndpointUnavailableError,
+                KeyError,
+                StatusError,
+                TypeError,
+
+        ) as e:
+            logger.error(e)
+            send_message(bot, str(e))
         except NoNewStatus as nns:
             logger.debug(nns)
         except Exception as error:
