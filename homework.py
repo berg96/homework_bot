@@ -8,15 +8,14 @@ import telegram
 from dotenv import load_dotenv
 from requests.exceptions import HTTPError, RequestException
 
-from exceptions import AuthenticationError
+from exceptions import AuthenticationError, ApiError
 
 load_dotenv()
 
+LOG_FORMAT = '%(asctime)s [%(levelname)s] %(funcName)s::%(lineno)d %(message)s'
 logger = logging.getLogger(__name__)
 stream_handler = logging.StreamHandler(sys.stdout)
-formatter = logging.Formatter(
-    '%(asctime)s [%(levelname)s] %(funcName)s::%(lineno)d %(message)s'
-)
+formatter = logging.Formatter(LOG_FORMAT)
 stream_handler.setFormatter(formatter)
 logger.addHandler(stream_handler)
 
@@ -56,8 +55,7 @@ def set_logging_basic_config():
         level=logging.DEBUG,
         filename=__file__ + '.log',
         filemode='w',
-        format='%(asctime)s [%(levelname)s] '
-               '%(funcName)s::%(lineno)d %(message)s'
+        format=LOG_FORMAT
     )
 
 
@@ -97,7 +95,7 @@ def get_api_answer(timestamp):
         )
 
     except RequestException as re:
-        raise RequestException(
+        raise ApiError(
             API_ERROR_MESSAGE.format(
                 error=re, status_code='unknown',
                 headers=HEADERS, timestamp=timestamp
@@ -198,6 +196,7 @@ def main():
                 logger.debug('Отсутствие в ответе новых статусов.')
 
         except (
+            ApiError,
             AuthenticationError,
             HTTPError,
             KeyError,
