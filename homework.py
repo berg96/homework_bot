@@ -12,12 +12,9 @@ from exceptions import AuthenticationError, ApiError
 
 load_dotenv()
 
-LOG_FORMAT = '%(asctime)s [%(levelname)s] %(funcName)s::%(lineno)d %(message)s'
 logger = logging.getLogger(__name__)
 stream_handler = logging.StreamHandler(sys.stdout)
-formatter = logging.Formatter(LOG_FORMAT)
-stream_handler.setFormatter(formatter)
-logger.addHandler(stream_handler)
+file_handler = logging.FileHandler(__file__ + '.log')
 
 PRACTICUM_TOKEN = os.getenv('PRACTICUM_TOKEN')
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
@@ -47,16 +44,6 @@ API_ERROR_MESSAGE = (
     'Headers: {headers}, '
     'params: "from_date": {timestamp}.'
 )
-
-
-def set_logging_basic_config():
-    """Меняет настройки логгера."""
-    logging.basicConfig(
-        level=logging.DEBUG,
-        filename=__file__ + '.log',
-        filemode='w',
-        format=LOG_FORMAT
-    )
 
 
 def check_tokens():
@@ -217,5 +204,10 @@ def main():
 
 
 if __name__ == '__main__':
-    set_logging_basic_config()
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format='%(asctime)s [%(levelname)s] '
+               '%(funcName)s::%(lineno)d %(message)s',
+        handlers=[stream_handler, file_handler]
+    )
     main()
