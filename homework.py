@@ -6,22 +6,17 @@ import time
 import requests
 import telegram
 from dotenv import load_dotenv
+from requests.exceptions import HTTPError, RequestException
 
-from exceptions import (
-    AuthenticationError,
-    EndpointError,
-    EndpointUnavailableError,
-    NoNewStatus,
-    StatusError
-)
+from exceptions import AuthenticationError
 
 load_dotenv()
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
-stream_handler = logging.StreamHandler()
-stream_handler.setLevel(logging.DEBUG)
-formatter = logging.Formatter('%(asctime)s [%(levelname)s] %(message)s')
+stream_handler = logging.StreamHandler(sys.stdout)
+formatter = logging.Formatter(
+    '%(asctime)s [%(levelname)s] %(funcName)s::%(lineno)d %(message)s'
+)
 stream_handler.setFormatter(formatter)
 logger.addHandler(stream_handler)
 
@@ -39,27 +34,59 @@ HOMEWORK_VERDICTS = {
     'rejected': 'Работа проверена: у ревьюера есть замечания.'
 }
 
-HW_STATUS = (None, None)
-LAST_MESSAGE = None
+STATUS_CHANGE_MESSAGE = (
+    'Изменился статус проверки работы "{homework_name}". {status}'
+)
+BOT_MESSAGE = 'Бот отправил сообщение "{message}"'
+SEND_MESSAGE_ERROR = (
+    'Сбой при отправке сообщения в Telegram "{message}" : {error}.'
+)
+API_ERROR_MESSAGE = (
+    'Сбой в работе программы: {error}. '
+    f'Эндпоинт: {ENDPOINT}. '
+    'Код ответа API: {status_code}. '
+    'Headers: {headers}, '
+    'params: "from_date": {timestamp}.'
+)
+
+
+def set_logging_basic_config():
+    """Меняет настройки логгера."""
+    logging.basicConfig(
+        level=logging.DEBUG,
+        filename=__file__ + '.log',
+        filemode='w',
+        format='%(asctime)s [%(levelname)s] '
+               '%(funcName)s::%(lineno)d %(message)s'
+    )
 
 
 def check_tokens():
     """Проверяет доступность переменных окружения."""
-    return all([PRACTICUM_TOKEN, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID])
+    missing_tokens = None
+    for token, value in {
+        'PRACTICUM_TOKEN': PRACTICUM_TOKEN,
+        'TELEGRAM_TOKEN': TELEGRAM_TOKEN,
+        'TELEGRAM_CHAT_ID': TELEGRAM_CHAT_ID,
+    }.items():
+        if not value:
+            logger.critical(
+                f'Отсутствует обязательная переменная окружения: {token}.'
+            )
+            missing_tokens = True
+    if missing_tokens:
+        logger.critical('Программа принудительно остановлена.')
+        raise ValueError('Отсутствуют обязательные переменные окружения')
 
 
 def send_message(bot, message):
     """Отправляет сообщение в Telegram чат."""
-    global LAST_MESSAGE
-
     try:
-        if message != LAST_MESSAGE:
-            bot.send_message(TELEGRAM_CHAT_ID, message)
-            logger.debug(f'Бот отправил сообщение "{message}"')
-            LAST_MESSAGE = message
+        bot.send_message(TELEGRAM_CHAT_ID, message)
+        logger.debug(BOT_MESSAGE.format(message=message))
 
     except Exception as e:
-        logger.error(f'Сбой при отправке сообщения в Telegram: {e}')
+        logger.exception(SEND_MESSAGE_ERROR.format(message=message, error=e))
 
 
 def get_api_answer(timestamp):
@@ -68,102 +95,128 @@ def get_api_answer(timestamp):
         response = requests.get(
             ENDPOINT, headers=HEADERS, params={'from_date': timestamp}
         )
-        if response.status_code != 200:
-            raise EndpointUnavailableError(
-                f'Сбой в работе программы: Эндпоинт {ENDPOINT} недоступен. '
-                f'Код ответа API: {response.status_code}'
-            )
-        return response.json()
 
-    except EndpointUnavailableError:
-        raise
-    except Exception as e:
-        raise EndpointError(f'Сбой при запросе к эндпоинту {ENDPOINT}: {e}')
+    except RequestException as re:
+        raise RequestException(
+            API_ERROR_MESSAGE.format(
+                error=re, status_code='unknown',
+                headers=HEADERS, timestamp=timestamp
+            )
+        )
+
+    if response.status_code != 200:
+        raise HTTPError(
+            API_ERROR_MESSAGE.format(
+                error='HTTPError',
+                status_code=response.status_code,
+                headers=HEADERS,
+                timestamp=timestamp
+            )
+        )
+
+    response_dict = response.json()
+
+    if response_dict.get('code') or response_dict.get('error'):
+        if response_dict.get('code') == 'UnknownError':
+            raise TypeError(
+                API_ERROR_MESSAGE.format(
+                    error=response_dict['error']['error'],
+                    status_code=response.status_code,
+                    headers=HEADERS,
+                    timestamp=timestamp
+                )
+            )
+        elif response_dict.get('code') == 'not_authenticated':
+            raise AuthenticationError(
+                API_ERROR_MESSAGE.format(
+                    error=response_dict['message'],
+                    status_code=response.status_code,
+                    headers=HEADERS,
+                    timestamp=timestamp
+                )
+            )
+        else:
+            raise ValueError(
+                API_ERROR_MESSAGE.format(
+                    error=response_dict.get('error'),
+                    status_code=response.status_code,
+                    headers=HEADERS,
+                    timestamp=timestamp
+                )
+            )
+
+    return response_dict
 
 
 def check_response(response):
     """Проверяет ответ API на соответствие документации."""
-    expected_keys = {'homeworks', 'current_date'}
-
-    if type(response) is not dict:
+    if not isinstance(response, dict):
         raise TypeError(f'Ожидался словарь, получен {type(response)}')
 
-    if expected_keys != set(response.keys()):
-        if response['code'] == 'UnknownError':
-            raise TypeError(response['error']['error'])
-        elif response['code'] == 'not_authenticated':
-            raise AuthenticationError(response['message'])
-        else:
-            raise KeyError('Отсутствуют ожидаемые ключи в ответе API: '
-                           f'{expected_keys - set(response.keys())}')
+    if 'homeworks' not in response:
+        raise KeyError('Отсутствуют ожидаемые ключи в ответе API: "homeworks"')
 
-    if type(response['homeworks']) is not list:
+    if not isinstance(response['homeworks'], list):
         raise TypeError(
             f'Ожидался список, получен: {type(response["homeworks"])}'
         )
 
-    if not response['homeworks']:
-        raise NoNewStatus('Нет нового статуса')
-
 
 def parse_status(homework):
     """Извлекает из информации о конкретной домашней работе статус."""
-    global HW_STATUS
-
-    if 'status' in homework:
-        if 'homework_name' in homework:
-            if (homework['homework_name'], homework['status']) != HW_STATUS:
-                if homework['status'] not in HOMEWORK_VERDICTS:
-                    raise StatusError(
-                        f'Получен неожиданный статус: {homework["status"]}'
-                    )
-                HW_STATUS = (homework['homework_name'], homework['status'])
-                return (
-                    f'Изменился статус проверки работы '
-                    f'"{homework["homework_name"]}". '
-                    f'{HOMEWORK_VERDICTS.get(homework["status"])}'
-                )
-        raise StatusError('Нет ожидаемого ключа: homework_name')
-    raise StatusError('Нет ожидаемого ключа: status')
+    if 'status' not in homework:
+        raise KeyError('Нет ожидаемого ключа: status')
+    if 'homework_name' not in homework:
+        raise KeyError('Нет ожидаемого ключа: homework_name')
+    if homework['status'] not in HOMEWORK_VERDICTS:
+        raise ValueError(
+            f'Получен неожиданный статус: {homework["status"]}'
+        )
+    return STATUS_CHANGE_MESSAGE.format(
+        homework_name=homework['homework_name'],
+        status=HOMEWORK_VERDICTS[homework['status']]
+    )
 
 
 def main():
     """Основная логика работы бота."""
-    if not check_tokens():
-        logger.critical(
-            '''Отсутствуют обязательные переменные окружения.
-Программа принудительно остановлена.'''
-        )
-        sys.exit(0)
+    last_message = None
+    check_tokens()
     bot = telegram.Bot(token=TELEGRAM_TOKEN)
     timestamp = int(time.time())
     while True:
         try:
             response = get_api_answer(timestamp)
             check_response(response)
-            timestamp = response['current_date']
-            send_message(bot, parse_status(response['homeworks'][0]))
+            if response.get('homeworks'):
+                message = parse_status(response['homeworks'][0])
+                if last_message != message:
+                    send_message(bot, message)
+                    last_message = message
+                    timestamp = response.get('current_date', timestamp)
+            else:
+                logger.debug('Отсутствие в ответе новых статусов.')
 
         except (
-                AuthenticationError,
-                EndpointError,
-                EndpointUnavailableError,
-                KeyError,
-                StatusError,
-                TypeError,
-
+            AuthenticationError,
+            HTTPError,
+            KeyError,
+            RequestException,
+            TypeError,
+            ValueError,
         ) as e:
-            logger.error(e)
-            send_message(bot, str(e))
-        except NoNewStatus as nns:
-            logger.debug(nns)
+            logger.error(e, exc_info=True)
+            if last_message != str(e):
+                send_message(bot, str(e))
         except Exception as error:
             message = f'Сбой в работе программы: {error}'
             logger.error(message)
-            send_message(bot, message)
+            if last_message != message:
+                send_message(bot, message)
         finally:
             time.sleep(RETRY_PERIOD)
 
 
 if __name__ == '__main__':
+    set_logging_basic_config()
     main()
