@@ -26,6 +26,7 @@ HOMEWORK_VERDICTS = {
 }
 ERROR_MISSING_ENV_VARIABLE = (
     'Отсутствуют обязательные переменные окружения: {tokens}.'
+    'Программа принудительно остановлена.'
 )
 STATUS_CHANGE_MESSAGE = (
     'Изменился статус проверки работы "{homework_name}". {status}'
@@ -60,7 +61,6 @@ INSTANCE_LIST_ERROR = (
 UNEXPECTED_STATUS_ERROR = (
     'В ответе получен неожиданный статус домашнего задания: {status}'
 )
-PROGRAM_STOPPED = 'Программа принудительно остановлена.'
 MISSING_EXPECTED_KEY = 'Отсутствует ожидаемый ключ в ответе API: "homeworks"'
 MISSING_KEY_STATUS = 'Нет ожидаемого ключа: status'
 MISSING_KEY_HOMEWORK_NAME = 'Нет ожидаемого ключа: homework_name'
@@ -76,7 +76,6 @@ def check_tokens():
         logger.critical(
             ERROR_MISSING_ENV_VARIABLE.format(tokens=missing_tokens)
         )
-        logger.critical(PROGRAM_STOPPED)
         raise ValueError(
             ERROR_MISSING_ENV_VARIABLE.format(tokens=missing_tokens)
         )
