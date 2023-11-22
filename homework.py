@@ -11,8 +11,6 @@ from requests.exceptions import RequestException
 load_dotenv()
 
 logger = logging.getLogger(__name__)
-stream_handler = logging.StreamHandler(sys.stdout)
-file_handler = logging.FileHandler(__file__ + '.log')
 
 PRACTICUM_TOKEN = os.getenv('PRACTICUM_TOKEN')
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
@@ -27,7 +25,7 @@ HOMEWORK_VERDICTS = {
     'rejected': 'Работа проверена: у ревьюера есть замечания.'
 }
 ERROR_MISSING_ENV_VARIABLE = (
-    'Отсутствует обязательная переменная окружения: {token}.'
+    'Отсутствуют обязательные переменные окружения: {tokens}.'
 )
 STATUS_CHANGE_MESSAGE = (
     'Изменился статус проверки работы "{homework_name}". {status}'
@@ -39,15 +37,18 @@ SEND_MESSAGE_ERROR = (
 REQUEST_PARAMS = (
     'Параметры запроса: Эндпоинт: {url}, Headers: {headers}, params: {params}.'
 )
-API_ERROR_MESSAGE = '{error}. ' + REQUEST_PARAMS
+API_ERROR_MESSAGE = (
+    '{error}. '
+    f'{REQUEST_PARAMS}'
+)
 STATUS_CODE_ERROR = (
     'Полученный статус кода: {status_code} != 200. '
-    'Полученный ответ: {response}. '
-) + REQUEST_PARAMS
+    f'{REQUEST_PARAMS}'
+)
 KEY_WITH_ERROR = (
-    'В ответе найден "{key_error}": {possible_text_error}. '
-    'Полученный ответ: {response}. '
-) + REQUEST_PARAMS
+    'В ответе найден "{key_error}": {text_error}. '
+    f'{REQUEST_PARAMS}'
+)
 ERROR_MESSAGE = 'Сбой в работе программы: {error}'
 INSTANCE_DICT_ERROR = (
     'В ответе ожидался словарь, получен другой тип данных: {type}'
@@ -59,20 +60,26 @@ INSTANCE_LIST_ERROR = (
 UNEXPECTED_STATUS_ERROR = (
     'В ответе получен неожиданный статус домашнего задания: {status}'
 )
+PROGRAM_STOPPED = 'Программа принудительно остановлена.'
+MISSING_EXPECTED_KEY = 'Отсутствует ожидаемый ключ в ответе API: "homeworks"'
+MISSING_KEY_STATUS = 'Нет ожидаемого ключа: status'
+MISSING_KEY_HOMEWORK_NAME = 'Нет ожидаемого ключа: homework_name'
+MISSING_NEW_STATUS = 'Отсутствие в ответе новых статусов.'
 
 
 def check_tokens():
     """Проверяет доступность переменных окружения."""
-    missing_tokens = None
-    for token in EXPECTED_TOKENS:
-        if not globals()[token]:
-            logger.critical(
-                ERROR_MISSING_ENV_VARIABLE.format(token=token)
-            )
-            missing_tokens = True
+    missing_tokens = [
+        token for token in EXPECTED_TOKENS if not globals()[token]
+    ]
     if missing_tokens:
-        logger.critical('Программа принудительно остановлена.')
-        raise ValueError('Отсутствуют обязательные переменные окружения')
+        logger.critical(
+            ERROR_MISSING_ENV_VARIABLE.format(tokens=missing_tokens)
+        )
+        logger.critical(PROGRAM_STOPPED)
+        raise ValueError(
+            ERROR_MISSING_ENV_VARIABLE.format(tokens=missing_tokens)
+        )
 
 
 def send_message(bot, message):
@@ -98,13 +105,12 @@ def get_api_answer(timestamp):
             API_ERROR_MESSAGE.format(error=error, **request_params)
         )
     response_data = response.json()
-    for key in response_data.keys():
-        if key != 'homeworks' and key != 'current_date':
+    for key in ['code', 'error']:
+        if key in response_data:
             raise ValueError(
                 KEY_WITH_ERROR.format(
                     key_error=key,
-                    possible_text_error=response_data.get(key),
-                    response=response_data,
+                    text_error=response_data.get(key),
                     **request_params
                 )
             )
@@ -112,7 +118,6 @@ def get_api_answer(timestamp):
         raise RequestException(
             STATUS_CODE_ERROR.format(
                 status_code=response.status_code,
-                response=response_data,
                 **request_params
             )
         )
@@ -124,7 +129,7 @@ def check_response(response):
     if not isinstance(response, dict):
         raise TypeError(INSTANCE_DICT_ERROR.format(type=type(response)))
     if 'homeworks' not in response:
-        raise KeyError('Отсутствует ожидаемый ключ в ответе API: "homeworks"')
+        raise KeyError(MISSING_EXPECTED_KEY)
     homeworks = response['homeworks']
     if not isinstance(homeworks, list):
         raise TypeError(INSTANCE_LIST_ERROR.format(type=type(homeworks)))
@@ -134,9 +139,9 @@ def parse_status(homework):
     """Извлекает из информации о конкретной домашней работе статус."""
     homework_status = homework['status']
     if 'status' not in homework:
-        raise KeyError('Нет ожидаемого ключа: status')
+        raise KeyError(MISSING_KEY_STATUS)
     if 'homework_name' not in homework:
-        raise KeyError('Нет ожидаемого ключа: homework_name')
+        raise KeyError(MISSING_KEY_HOMEWORK_NAME)
     if homework_status not in HOMEWORK_VERDICTS:
         raise ValueError(
             UNEXPECTED_STATUS_ERROR.format(status=homework_status)
@@ -157,20 +162,18 @@ def main():
         try:
             response = get_api_answer(timestamp)
             check_response(response)
-            if response.get('homeworks'):
-                message = parse_status(response['homeworks'][0])
-                if last_message != message:
-                    if send_message(bot, message):
-                        last_message = message
-                        timestamp = response.get('current_date', timestamp)
-            else:
-                logger.debug('Отсутствие в ответе новых статусов.')
+            if not response.get('homeworks'):
+                logger.debug(MISSING_NEW_STATUS)
+                continue
+            message = parse_status(response['homeworks'][0])
+            if last_message != message and send_message(bot, message):
+                last_message = message
+                timestamp = response.get('current_date', timestamp)
         except Exception as error:
             message = ERROR_MESSAGE.format(error=error)
             logger.exception(message)
-            if last_message != message:
-                if send_message(bot, message):
-                    last_message = message
+            if last_message != message and send_message(bot, message):
+                last_message = message
         finally:
             time.sleep(RETRY_PERIOD)
 
@@ -180,6 +183,9 @@ if __name__ == '__main__':
         level=logging.DEBUG,
         format='%(asctime)s [%(levelname)s] '
                '%(funcName)s::%(lineno)d %(message)s',
-        handlers=[stream_handler, file_handler]
+        handlers=[
+            logging.StreamHandler(sys.stdout),
+            logging.FileHandler(__file__ + '.log')
+        ]
     )
     main()
